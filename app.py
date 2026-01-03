@@ -19,7 +19,7 @@ if st.button('🎯 开始分析最新交易日数据'):
         try:
             # 1. 获取数据
             # 自动获取最新交易日数据
-            df = ak.stock_lhb_detail_daily_em() 
+            df = ak.stock_zh_a_spot_em()
             
             if df is not None and not df.empty:
                 # 2. 数据处理
