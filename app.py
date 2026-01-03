@@ -18,7 +18,7 @@ if st.button('🎯 开始分析最新交易日数据'):
     with st.spinner('正在调取交易所数据...'):
         try:
             # 使用最新且稳定的龙虎榜活跃股接口
-            df = ak.stock_lhb_ggtj_em() 
+            df = ak.stock_zh_a_spot_em()
             
             if df is not None and not df.empty:
                 # --- 智能列名修复逻辑 ---
