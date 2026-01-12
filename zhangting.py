@@ -14,7 +14,7 @@ with st.sidebar:
     st.header("⚙️ 狙击参数 (严选)")
     # 涨幅放宽一点，因为好票可能已经涨起来了
     min_pct = st.slider('最小涨幅 (%)', 0.0, 9.5, 3.0) 
-    max_pct = st.slider('最大涨幅 (%)', 5.0, 10.0, 8.5) # 避开已经封板的
+    max_pct = st.slider('最大涨幅 (%)', 5.0, 20.0, 8.5) # 避开已经封板的
     
     st.divider()
     st.write("🔍 **资金与市值**")
