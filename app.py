@@ -13,7 +13,7 @@ with st.sidebar:
     st.header("🔍 策略因子")
     buy_limit = st.slider('成交额门槛 (万元)', 500, 10000, 2000, step=500)
     min_pct = st.slider('最小涨幅 (%)', 0.0, 9.0, 4.0)
-    max_pct = st.slider('最大涨幅 (%)', 5.0, 11.0, 9.5)
+    max_pct = st.slider('最大涨幅 (%)', 5.0, 20.0, 9.5)
     min_turnover = st.slider('最小换手率 (%)', 0.0, 20.0, 3.0)
     top_n = st.number_input('显示前几名', value=15)
     
