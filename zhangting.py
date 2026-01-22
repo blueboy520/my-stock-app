@@ -1,115 +1,143 @@
 import streamlit as st
 import akshare as ak
 import pandas as pd
+import numpy as np
 import requests
 import json
+import time
 
-# --- 1. 页面配置 ---
-st.set_page_config(page_title="涨停狙击手·尊享版", page_icon="🎯", layout="wide")
-st.title("🎯 涨停狙击手 (高胜率收敛模式)")
-st.caption("核心逻辑：均线多头排列 + 资金暴力抢筹 + 黄金换手率")
+# --- 页面配置 ---
+st.set_page_config(page_title="2025实战打板系统(新浪源)", page_icon="🔥", layout="wide")
 
-# --- 2. 侧边栏：参数设置 (默认值已调至最严苛) ---
+st.title("🔥 A股超短线·首板挖掘 (新浪救援版)")
+st.caption("当前使用【新浪财经】数据源，以绕过东方财富的云端IP封锁")
+
+# --- 侧边栏：战法参数 ---
 with st.sidebar:
-    st.header("⚙️ 狙击参数 (严选)")
-    # 涨幅放宽一点，因为好票可能已经涨起来了
-    min_pct = st.slider('最小涨幅 (%)', 0.0, 9.5, 3.0) 
-    max_pct = st.slider('最大涨幅 (%)', 5.0, 20.0, 8.5) # 避开已经封板的
+    st.header("🎛️ 核心参数")
+    st.info("注：新浪源暂不支持'量比'筛选")
+    
+    st.subheader("1. 进攻参数")
+    min_pct = st.slider('最小涨幅 (%)', 0.0, 9.0, 3.5)
+    max_pct = st.slider('最大涨幅 (%)', 5.0, 9.9, 7.5)
+    
+    st.subheader("2. 防守参数")
+    min_turnover = st.slider('换手率 (%)', 1.0, 20.0, (5.0, 12.0))
+    mkt_cap_limit = st.slider('最大流通市值 (亿)', 20, 500, 100)
     
     st.divider()
-    st.write("🔍 **资金与市值**")
-    buy_limit = st.slider('成交额门槛 (万元)', 1000, 50000, 8000) # 只要大资金参与的
-    min_vol_ratio = st.slider("最小量比 (倍)", 1.0, 5.0, 2.0) # 量比必须大
-    turnover_range = st.slider("换手率区间 (%)", 1.0, 30.0, (5.0, 15.0)) # 锁定黄金换手区间
-    
-    st.divider()
-    st.header("🤖 微信推送")
+    st.header("🤖 微信预警")
     wechat_webhook = st.text_input("Webhook 地址", type="password")
-    enable_push = st.checkbox("开启自动推送")
+    enable_push = st.checkbox("发现目标立即推送")
 
-# --- 3. 工具函数 ---
+# --- 工具函数 ---
 def get_em_url(code):
+    # 跳转依然用东财，看图更方便
     market = "1" if str(code).startswith(('60', '68')) else "2"
     return f"https://quote.eastmoney.com/basic/full.html?stockcode={code}.{market}"
 
-def send_wechat_msg(url, content):
+def send_wechat(url, title, content):
     headers = {"Content-Type": "application/json"}
-    data = {"msgtype": "markdown", "markdown": {"content": f"## 🎯 狙击手预警\n{content}"}}
-    try: requests.post(url, headers=headers, data=json.dumps(data))
+    data = {"msgtype": "markdown", "markdown": {"content": f"## {title}\n{content}"}}
+    try: requests.post(url, headers=headers, data=json.dumps(data), timeout=2)
     except: pass
 
-# --- 4. 核心逻辑 ---
-if st.button('🚀 启动高胜率扫描'):
-    status_text = st.empty()
-    status_text.info('正在拉取全市场实时数据...')
+def get_sina_data_safe():
+    """获取新浪全市场数据，抗封锁能力强"""
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            # 使用新浪接口：stock_zh_a_spot
+            df = ak.stock_zh_a_spot()
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            time.sleep(1)
+    return None
+
+# --- 主逻辑 ---
+if st.button('🚀 启动新浪源扫描'):
+    status = st.status("正在切换至新浪线路...", expanded=True)
     
     try:
-        # 1. 获取基础行情
-        df = ak.stock_zh_a_spot_em()
+        # Step 1: 获取数据
+        status.write("📡 正在连接新浪财经实时数据...")
+        df = get_sina_data_safe()
         
-        # 2. 数据清洗与格式化
-        numeric_cols = ['涨跌幅', '成交额', '换手率', '流通市值', '量比', '最新价', '最高', '今开']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        if df is None:
+            st.error("新浪接口也暂时繁忙，请过几分钟再试，或建议在本地电脑运行。")
+            st.stop()
+
+        # Step 2: 数据清洗 (适配新浪列名)
+        # 新浪返回列名：symbol, code, name, trade, pricechange, changepercent, buy, sell, settlement, open, high, low, volume, amount, ticktime, per, pb, mktcap, nmc, turnoverratio
         
-        # 3. 第一轮筛选：基础池过滤 (快速排除垃圾股)
-        # 逻辑：非ST、上市超过30天(这里简单用代码非68/30开头粗略过滤新股太复杂，暂且忽略)、有成交量
-        base_mask = (
-            (~df['名称'].str.contains('ST')) & 
-            (~df['名称'].str.contains('退')) & 
-            (df['成交额'] > buy_limit * 10000)
+        # 重命名为我们习惯的中文
+        df = df.rename(columns={
+            'code': '代码',
+            'name': '名称',
+            'trade': '最新价',
+            'changepercent': '涨跌幅',
+            'amount': '成交额',
+            'nmc': '流通市值', # nmc是流通市值
+            'turnoverratio': '换手率',
+            'open': '今开'
+        })
+
+        # 转换数值
+        numeric_cols = ['涨跌幅', '最新价', '成交额', '流通市值', '换手率', '今开']
+        for c in numeric_cols:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+        
+        # 新浪的流通市值单位是“万元”，需要统一逻辑
+        # 我们的策略是用“亿”判断，所以 1亿 = 10000万
+        # 下面计算时要注意单位换算
+        
+        df['代码'] = df['代码'].astype(str)
+        df['名称'] = df['名称'].astype(str)
+        
+        # Step 3: 基础过滤
+        mask_basic = (
+            (~df['名称'].str.contains('ST|退')) & 
+            (~df['代码'].str.startswith(('8', '4'))) &
+            (df['成交额'] > 3000 * 10000) # 成交额 > 3000万
         )
-        pool = df[base_mask].copy()
+        pool = df[mask_basic].copy()
         
-        status_text.info(f'基础池筛选完毕，剩余 {len(pool)} 只，正在进行趋势计算...')
+        status.write(f"🔍 基础池剩余 {len(pool)} 只，执行筛选...")
         
-        # 4. 第二轮筛选：高胜率形态 (狙击逻辑)
-        # 这一步是关键！
-        final_list = []
+        # Step 4: 核心选股逻辑
+        mask_pct = (pool['涨跌幅'] >= min_pct) & (pool['涨跌幅'] <= max_pct)
+        mask_candle = pool['最新价'] > pool['今开'] # 真阳线
+        mask_turn = (pool['换手率'] >= min_turnover[0]) & (pool['换手率'] <= min_turnover[1])
+        # 新浪流通市值单位是万，所以 x/10000 = 亿
+        mask_cap = ((pool['流通市值'] / 10000) <= mkt_cap_limit)
         
-        # 为了速度，我们直接用 pandas 向量化计算，不遍历
-        # 逻辑A: 涨幅在攻击区间
-        cond_pct = (pool['涨跌幅'] >= min_pct) & (pool['涨跌幅'] <= max_pct)
+        candidates = pool[mask_pct & mask_candle & mask_turn & mask_cap].copy()
         
-        # 逻辑B: 量比爆发 (主力进场信号)
-        cond_vol = pool['量比'] >= min_vol_ratio
+        # Step 5: 结果展示 (新浪源不支持K线回测，因为请求太慢，直接出结果)
+        status.update(label="扫描完成！", state="complete", expanded=False)
         
-        # 逻辑C: 换手率健康 (人气充足但未失控)
-        cond_turn = (pool['换手率'] >= turnover_range[0]) & (pool['换手率'] <= turnover_range[1])
-        
-        # 逻辑D: 必须是阳线 (收盘 > 开盘) - 剔除假阴真阳
-        cond_red = pool['最新价'] > pool['今开']
-        
-        # 逻辑E: 市值适中 (30亿-300亿最容易出妖股)
-        mkt_cap_val = pool['流通市值'] / 100000000
-        cond_cap = (mkt_cap_val >= 30) & (mkt_cap_val <= 300)
-        
-        target_df = pool[cond_pct & cond_vol & cond_turn & cond_red & cond_cap].copy()
-        
-        # 5. 结果展示
-        if not target_df.empty:
-            # 综合评分排序：量比 * 涨幅 (量价齐升的最优先)
-            target_df['评分'] = target_df['量比'] * target_df['涨跌幅']
-            target_df = target_df.sort_values(by='评分', ascending=False).head(10)
+        if not candidates.empty:
+            # 排序：按换手率活跃度
+            res = candidates.sort_values(by='换手率', ascending=False).head(20)
             
-            target_df['市值(亿)'] = (target_df['流通市值'] / 100000000).round(1)
-            target_df['链接'] = target_df['代码'].apply(lambda x: f'<a href="{get_em_url(x)}" target="_blank">🔗看图</a>')
+            st.success(f"🎯 新浪源锁定 {len(res)} 只潜力股")
             
-            status_text.success(f"🎯 最终锁定 {len(target_df)} 只『主升浪』形态个股！")
+            res['市值(亿)'] = (res['流通市值'] / 10000).round(1)
+            res['跳转'] = res['代码'].apply(lambda x: f'<a href="{get_em_url(x)}" target="_blank">🔗看K线</a>')
             
-            # 显示精美表格
-            cols = ['代码', '名称', '涨跌幅', '量比', '换手率', '市值(亿)', '成交额', '链接']
-            # 将成交额转为亿
-            target_df['成交额'] = (target_df['成交额'] / 100000000).round(2).astype(str) + '亿'
+            # 这里的成交额单位也是元，转亿
+            res['成交额(亿)'] = (res['成交额'] / 100000000).round(2)
+
+            cols = ['代码', '名称', '涨跌幅', '最新价', '换手率', '成交额(亿)', '市值(亿)', '跳转']
+            st.write(res[cols].to_html(escape=False, index=False), unsafe_allow_html=True)
             
-            st.write(target_df[cols].to_html(escape=False, index=False), unsafe_allow_html=True)
-            
-            # 微信推送
             if enable_push and wechat_webhook:
-                items = [f"- **{r['名称']}**: 涨`{r['涨跌幅']}%` 量比`{r['量比']}` 换手`{r['换手率']}%`" for _, r in target_df.iterrows()]
-                send_wechat_msg(wechat_webhook, "\n".join(items))
+                msg = "\n".join([f"- {r['名称']}: 涨{r['涨跌幅']}% 换手{r['换手率']}%" for _, r in res.head(5).iterrows()])
+                send_wechat(wechat_webhook, "🔥 新浪源预警", msg)
         else:
-            status_text.warning("⚠️ 市场情绪较弱，未发现符合『高胜率』模型的股票。宁缺毋滥！")
-            
+            st.warning("⚠️ 未发现符合条件的个股。")
+
     except Exception as e:
-        status_text.error(f"数据分析中断: {e}")
+        st.error(f"新浪源连接失败: {str(e)}")
+
