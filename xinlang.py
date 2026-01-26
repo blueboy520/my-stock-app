@@ -6,19 +6,23 @@ import json
 import time
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="手机实战修复版", page_icon="📲", layout="wide")
+st.set_page_config(page_title="手机云端终极版", page_icon="📲", layout="wide")
 
-st.title("📲 A股首板挖掘 (新浪修复版)")
-st.caption("数据源：新浪财经 | 状态：自动适配列名")
+st.title("📲 A股首板挖掘 (云端稳定版)")
+st.caption("数据源：新浪财经 | 机制：60秒缓存防封 + 智能列名适配")
 
 # --- 2. 侧边栏：参数 ---
 with st.sidebar:
     st.header("🎛️ 筛选参数")
     
+    # 添加一个强制刷新按钮
+    if st.button("🔄 强制刷新数据"):
+        st.cache_data.clear()
+        st.rerun()
+
     min_pct = st.slider('最小涨幅 (%)', 0.0, 9.0, 3.5)
     max_pct = st.slider('最大涨幅 (%)', 5.0, 9.9, 8.5)
     
-    # 增加一个开关：如果换手率数据获取失败，允许关闭该条件
     filter_turnover = st.checkbox("启用换手率筛选", value=True)
     if filter_turnover:
         min_turnover = st.slider('换手率 (%)', 1.0, 20.0, (3.0, 12.0))
@@ -42,67 +46,81 @@ def send_wechat(url, content):
         requests.post(url, headers=headers, data=json.dumps(data), timeout=2)
     except: pass
 
-# --- 4. 主逻辑 ---
+# --- 4. 数据获取函数 (带缓存，这是防封的关键！) ---
+@st.cache_data(ttl=60) # 数据缓存60秒，防止滑块滑动时重复请求
+def fetch_sina_data():
+    """
+    尝试从新浪获取数据，带详细的错误捕捉
+    """
+    last_error = ""
+    for i in range(3): # 重试3次
+        try:
+            # 使用 ak.stock_zh_a_spot() 接口
+            df = ak.stock_zh_a_spot()
+            if df is not None and not df.empty:
+                return df, "" # 成功，错误信息为空
+        except Exception as e:
+            last_error = str(e)
+            time.sleep(1) # 休息一下再重试
+            
+    return None, last_error
+
+# --- 5. 主逻辑 ---
 if st.button('🚀 启动云端扫描'):
     status = st.status("正在连接新浪财经...", expanded=True)
     
     try:
-        # === Step 1: 获取数据 ===
-        status.write("📡 拉取新浪实时行情...")
-        df = None
-        # 重试机制
-        for i in range(3):
-            try:
-                df = ak.stock_zh_a_spot()
-                if df is not None and not df.empty:
-                    break
-            except:
-                time.sleep(1)
+        # === Step 1: 获取数据 (带缓存) ===
+        status.write("📡 拉取新浪实时行情 (缓存模式)...")
         
-        if df is None or df.empty:
-            st.error("无法获取数据，请稍后重试。")
+        # 调用带缓存的函数
+        df, err_msg = fetch_sina_data()
+        
+        if df is None:
+            st.error(f"❌ 数据获取失败。报错信息: {err_msg}")
+            st.warning("建议：点击侧边栏的‘强制刷新数据’再试，或稍等几分钟。")
             st.stop()
 
-        # === Step 2: 智能列名映射（解决 KeyError 的核心）===
-        # 先把所有列名转成小写，防止 TurnoverRatio 和 turnoverratio 的区别
+        # === Step 2: 智能列名映射 (解决KeyError) ===
+        # 将列名统一转为小写
         df.columns = df.columns.str.lower()
         
-        # 调试：如果有问题，页面会显示这一行，告诉我列名是啥
-        # st.write("调试信息 - 原始列名:", df.columns.tolist())
+        # 调试：打印前5个列名，让我们看到到底返回了啥
+        # st.write("✅ 成功获取数据！原始列名样本:", df.columns.tolist()[:10])
         
-        # 建立“中英互译字典”
+        # 建立超级映射表 (包含所有可能的情况)
         rename_map = {
-            'code': '代码',
-            'symbol': '代码', 
-            'name': '名称',
-            'changepercent': '涨跌幅',
-            'trade': '最新价',
-            'volume': '成交量',
-            'amount': '成交额',
-            'open': '今开',
-            'high': '最高',
-            'low': '最低',
-            'turnoverratio': '换手率', # 这就是报错的原因，新浪给的是这个
-            'nmc': '流通市值',
-            'mktcap': '总市值'
+            'code': '代码', 'symbol': '代码', 
+            'name': '名称', 
+            'changepercent': '涨跌幅', 'pricechange': '涨跌幅',
+            'trade': '最新价', 'close': '最新价',
+            'volume': '成交量', 
+            'amount': '成交额', 
+            'open': '今开', 
+            'high': '最高', 
+            'low': '最低', 
+            'turnoverratio': '换手率', 'turnover': '换手率', # 重点照顾
+            'nmc': '流通市值', 'mktcap': '总市值'
         }
         
-        # 执行翻译
         df = df.rename(columns=rename_map)
         
-        # === Step 3: 缺失列补救 ===
-        # 如果翻译完还是没有“换手率”，就自动填0，防止报错
+        # === Step 3: 缺失列补救 (防崩溃盾牌) ===
+        missing_cols = []
         if '换手率' not in df.columns:
-            st.warning("⚠️ 数据源未返回换手率，已自动跳过该筛选。")
             df['换手率'] = 0.0
-            filter_turnover = False # 强制关闭筛选
-        
+            missing_cols.append('换手率')
+            filter_turnover = False # 强制关闭
+            
         if '流通市值' not in df.columns:
-             # 如果没有流通市值，试着用总市值顶替
             if '总市值' in df.columns:
                 df['流通市值'] = df['总市值']
             else:
                 df['流通市值'] = 0.0
+                missing_cols.append('流通市值')
+
+        if missing_cols:
+            st.warning(f"⚠️ 注意：数据源缺少字段 {missing_cols}，相关筛选已自动忽略。")
 
         # === Step 4: 数值转换 ===
         numeric_cols = ['涨跌幅', '最新价', '换手率', '成交额', '流通市值', '今开']
@@ -122,13 +140,16 @@ if st.button('🚀 启动云端扫描'):
         )
         pool = df[mask_basic].copy()
         
-        status.write(f"🔍 数据源返回 {len(pool)} 只活跃股，正在计算...")
+        status.write(f"🔍 有效数据 {len(pool)} 条，正在计算...")
         
         # 核心筛选
         mask_pct = (pool['涨跌幅'] >= min_pct) & (pool['涨跌幅'] <= max_pct)
         mask_candle = pool['最新价'] > pool['今开'] # 真阳线
         
-        # 市值筛选 (新浪单位通常是万元，这里除以10000换算成亿)
+        # 市值筛选 (新浪通常单位是万元)
+        # 智能判断单位：如果最大市值 > 100000，说明单位大概率是万
+        # 如果最大市值 > 100000000，说明单位是元
+        # 这里默认按万元处理 / 10000 = 亿
         mask_cap = ((pool['流通市值'] / 10000) <= mkt_cap_limit)
         
         final_mask = mask_pct & mask_candle & mask_cap
@@ -162,7 +183,7 @@ if st.button('🚀 启动云端扫描'):
             st.dataframe(
                 res[show_cols],
                 column_config={
-                    "链接": st.column_config.LinkColumn("K线", display_text="查看")
+                    "链接": st.column_config.LinkColumn("详情", display_text="K线")
                 },
                 hide_index=True,
                 use_container_width=True
@@ -172,10 +193,9 @@ if st.button('🚀 启动云端扫描'):
                 msg = "\n".join([f"- {r['名称']}: 涨{r['涨跌幅']}%" for _, r in res.head(5).iterrows()])
                 send_wechat(wechat_webhook, msg)
         else:
-            st.warning("⚠️ 暂无符合条件的个股。")
+            st.warning("⚠️ 暂无符合条件的个股 (建议适当放宽涨幅或市值条件)。")
             
     except Exception as e:
-        st.error(f"运行出错详情: {str(e)}")
-        # 如果还是出错，这行代码会救命：它会把新浪到底返回了什么列名打印出来
+        st.error(f"处理数据时出错: {str(e)}")
         if 'df' in locals() and df is not None:
-             st.write("❌ 调试信息-当前列名:", df.columns.tolist())
+             st.write("调试信息-列名:", df.columns.tolist())
