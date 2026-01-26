@@ -6,9 +6,9 @@ import json
 import time
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="手机实战版(修复)", page_icon="📲", layout="wide")
+st.set_page_config(page_title="手机实战修复版", page_icon="📲", layout="wide")
 
-st.title("📲 A股首板挖掘 (智能兼容版)")
+st.title("📲 A股首板挖掘 (新浪修复版)")
 st.caption("数据源：新浪财经 | 状态：自动适配列名")
 
 # --- 2. 侧边栏：参数 ---
@@ -17,10 +17,11 @@ with st.sidebar:
     
     min_pct = st.slider('最小涨幅 (%)', 0.0, 9.0, 3.5)
     max_pct = st.slider('最大涨幅 (%)', 5.0, 9.9, 8.5)
-    # 既然换手率报错，我们给它个开关，如果数据里没有就不筛
-    filter_turnover = st.checkbox("筛选换手率", value=True)
+    
+    # 增加一个开关：如果换手率数据获取失败，允许关闭该条件
+    filter_turnover = st.checkbox("启用换手率筛选", value=True)
     if filter_turnover:
-        min_turnover = st.slider('换手率 (%)', 1.0, 20.0, (5.0, 12.0))
+        min_turnover = st.slider('换手率 (%)', 1.0, 20.0, (3.0, 12.0))
     
     mkt_cap_limit = st.slider('最大流通市值 (亿)', 20, 500, 100)
     
@@ -49,6 +50,7 @@ if st.button('🚀 启动云端扫描'):
         # === Step 1: 获取数据 ===
         status.write("📡 拉取新浪实时行情...")
         df = None
+        # 重试机制
         for i in range(3):
             try:
                 df = ak.stock_zh_a_spot()
@@ -61,17 +63,17 @@ if st.button('🚀 启动云端扫描'):
             st.error("无法获取数据，请稍后重试。")
             st.stop()
 
-        # === Step 2: 智能列名映射（防报错核心）===
-        # 把所有英文列名转小写，防止大小写差异
+        # === Step 2: 智能列名映射（解决 KeyError 的核心）===
+        # 先把所有列名转成小写，防止 TurnoverRatio 和 turnoverratio 的区别
         df.columns = df.columns.str.lower()
         
-        # 调试信息：打印实际列名，如果还报错，截图给我看这个
-        # st.write("调试-实际列名:", df.columns.tolist()) 
+        # 调试：如果有问题，页面会显示这一行，告诉我列名是啥
+        # st.write("调试信息 - 原始列名:", df.columns.tolist())
         
-        # 建立映射字典
+        # 建立“中英互译字典”
         rename_map = {
             'code': '代码',
-            'symbol': '代码', # 有时候叫symbol
+            'symbol': '代码', 
             'name': '名称',
             'changepercent': '涨跌幅',
             'trade': '最新价',
@@ -80,22 +82,23 @@ if st.button('🚀 启动云端扫描'):
             'open': '今开',
             'high': '最高',
             'low': '最低',
-            'turnoverratio': '换手率', # 关键点：可能叫 turnoverratio
+            'turnoverratio': '换手率', # 这就是报错的原因，新浪给的是这个
             'nmc': '流通市值',
             'mktcap': '总市值'
         }
         
+        # 执行翻译
         df = df.rename(columns=rename_map)
         
-        # === Step 3: 缺失列自动填充（绝不崩溃）===
-        # 如果找不到‘换手率’，就造一个全是0的列，避免程序炸掉
+        # === Step 3: 缺失列补救 ===
+        # 如果翻译完还是没有“换手率”，就自动填0，防止报错
         if '换手率' not in df.columns:
-            st.warning("⚠️ 警告：数据源未返回'换手率'字段，已自动跳过该筛选条件。")
+            st.warning("⚠️ 数据源未返回换手率，已自动跳过该筛选。")
             df['换手率'] = 0.0
             filter_turnover = False # 强制关闭筛选
         
         if '流通市值' not in df.columns:
-            # 尝试用总市值代替
+             # 如果没有流通市值，试着用总市值顶替
             if '总市值' in df.columns:
                 df['流通市值'] = df['总市值']
             else:
@@ -125,10 +128,7 @@ if st.button('🚀 启动云端扫描'):
         mask_pct = (pool['涨跌幅'] >= min_pct) & (pool['涨跌幅'] <= max_pct)
         mask_candle = pool['最新价'] > pool['今开'] # 真阳线
         
-        # 市值筛选 (单位转换：万元 -> 亿元)
-        # 注意：有时候新浪返回单位是元，有时候是万，这里假设是万(常见情况)
-        # 简单判断：如果市值数值普遍很大(>10亿)，说明单位是元；如果普遍在几万几十万，说明是万
-        # 安全起见，直接用相对值排序更稳，这里维持原逻辑 / 10000
+        # 市值筛选 (新浪单位通常是万元，这里除以10000换算成亿)
         mask_cap = ((pool['流通市值'] / 10000) <= mkt_cap_limit)
         
         final_mask = mask_pct & mask_candle & mask_cap
@@ -143,7 +143,7 @@ if st.button('🚀 启动云端扫描'):
         status.update(label="扫描完成！", state="complete", expanded=False)
         
         if not candidates.empty:
-            # 优先按换手率排序，如果没有换手率数据，则按涨幅排序
+            # 排序
             sort_col = '换手率' if filter_turnover else '涨跌幅'
             res = candidates.sort_values(by=sort_col, ascending=False).head(20)
             
@@ -176,6 +176,6 @@ if st.button('🚀 启动云端扫描'):
             
     except Exception as e:
         st.error(f"运行出错详情: {str(e)}")
-        # 如果出错，打印列名帮我排查
+        # 如果还是出错，这行代码会救命：它会把新浪到底返回了什么列名打印出来
         if 'df' in locals() and df is not None:
-             st.write("当前可用列名:", df.columns.tolist())
+             st.write("❌ 调试信息-当前列名:", df.columns.tolist())
